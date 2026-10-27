@@ -1,6 +1,7 @@
+import os
 import unittest
-from unittest.mock import MagicMock
-from dispatcher import find_due_monitors, serialize_monitor, claim_monitor_for_dispatch
+from unittest.mock import MagicMock, patch
+from dispatcher import dispatch_monitor, find_due_monitors, lambda_handler, send_monitor_to_queue, serialize_monitor, claim_monitor_for_dispatch
 from decimal import Decimal
 import json
 from botocore.exceptions import ClientError
@@ -95,5 +96,106 @@ class TestDispatcher(unittest.TestCase):
 
         self.assertFalse(result)
 
+    def test_send_monitor_to_queue(self):
+        mock_sqs_client = MagicMock()
+        queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/CheckQueue"
+        monitor = {
+            "monitor_id": "mon-1",
+            "url": "https://example.com/api",
+            "interval_seconds": 900,
+            "is_active": True,
+            "next_check_at": 1700000900
+        }
+
+        expected_response = {"MessageId": "msg-123"}
+        mock_sqs_client.send_message.return_value = expected_response
+
+        result = send_monitor_to_queue(mock_sqs_client, queue_url, monitor)
+        self.assertEqual(result, expected_response)
+
+
+        mock_sqs_client.send_message.assert_called_once()
+        call_kwargs = mock_sqs_client.send_message.call_args.kwargs
+        self.assertEqual(call_kwargs["QueueUrl"], queue_url)
+        self.assertEqual(
+            json.loads(call_kwargs["MessageBody"]),
+            {
+                "monitor_id": "mon-1",
+                "url": "https://example.com/api",
+                "interval_seconds": 900,
+                "is_active": True,
+                "next_check_at": 1700000900
+            }
+        )
+
+    def test_dispatch_monitor_success(self):
+        mock_table = MagicMock()
+        mock_sqs_client = MagicMock()
+        queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/CheckQueue"
+        monitor = {
+            "monitor_id": "mon-1",
+            "url": "https://example.com/api",
+            "interval_seconds": 900,
+            "is_active": True,
+            "next_check_at": 1700000900
+        }
+        now = 1700000000
+
+        result = dispatch_monitor(mock_table, mock_sqs_client, queue_url, monitor, now)
+
+        self.assertTrue(result)
+        mock_table.update_item.assert_called_once()
+        mock_sqs_client.send_message.assert_called_once()
+
+    def test_dispatch_monitor_failure(self):
+        mock_table = MagicMock()
+        mock_sqs_client = MagicMock()
+        queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/CheckQueue"
+        monitor = {
+            "monitor_id": "mon-1",
+            "url": "https://example.com/api",
+            "interval_seconds": 900,
+            "is_active": True,
+            "next_check_at": 1700000900
+        }
+        now = 1700000000
+
+        mock_table.update_item.side_effect = ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+        )
+
+        result = dispatch_monitor(mock_table, mock_sqs_client, queue_url, monitor, now)
+
+        self.assertFalse(result)
+        mock_table.update_item.assert_called_once()
+        mock_sqs_client.send_message.assert_not_called()
+
+    @patch.dict(os.environ, {
+        "MONITORS_TABLE": "TestMonitorsTable",
+        "CHECK_QUEUE_URL": "https://sqs.example.test/CheckQueue",
+    })
+    @patch("dispatcher.dispatch_monitor", side_effect=[True, False])
+    @patch("dispatcher.find_due_monitors")
+    @patch("dispatcher.boto3.client")
+    @patch("dispatcher.boto3.resource")
+    def test_lambda_handler(
+        self,
+        mock_resource,
+        mock_client,
+        mock_find_due,
+        mock_dispatch,
+    ):
+        mock_find_due.return_value = [
+            {"monitor_id": "mon-1"},
+            {"monitor_id": "mon-2"},
+        ]
+
+        result = lambda_handler({}, None)
+
+        self.assertEqual(result, {"found": 2, "queued": 1})
+        mock_resource.return_value.Table.assert_called_once_with("TestMonitorsTable")
+        mock_client.assert_called_once_with("sqs")
+        self.assertEqual(mock_dispatch.call_count, 2)
+        
 if __name__ == '__main__':
     unittest.main()

@@ -43,7 +43,45 @@ Resources:
       KeySchema:
         - AttributeName: monitor_id
           KeyType: HASH 
-
+  CheckQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 345600 # 4 days in seconds
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CheckDLQ.Arn
+        maxReceiveCount: 3
+  CheckDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600 # 14 days in seconds
+  DispatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: hello_world/
+      Handler: dispatcher.lambda_handler
+      Runtime: python3.14
+      Timeout: 30
+      Environment:
+        Variables:
+          MONITORS_TABLE: !Ref MonitorsTable
+          CHECK_QUEUE_URL: !Ref CheckQueue 
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:UpdateItem
+              Resource: !GetAtt MonitorsTable.Arn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt CheckQueue.Arn
+      Events:
+        DispatchSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Enabled: false
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
