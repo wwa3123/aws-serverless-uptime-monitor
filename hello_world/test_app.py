@@ -4,10 +4,9 @@ from unittest.mock import MagicMock, patch
 import os
 import app
 
-class TestLambdaValidation(unittest.TestCase):
+class TestLambda(unittest.TestCase):
     
     def assert_status_code(self, event, expected_code):
-        """Helper to invoke the handler and check the status code."""
         response = app.lambda_handler(event, None)
         self.assertEqual(response.get('statusCode'), expected_code)
 
@@ -35,7 +34,6 @@ class TestLambdaValidation(unittest.TestCase):
         self.assert_status_code({"body": body}, 400)
 
     def test_interval_boolean_returns_400(self):
-        # json.dumps converts True to true, which parses as a boolean in Python
         body = json.dumps({"url": "https://example.com", "interval_seconds": True})
         self.assert_status_code({"body": body}, 400)
 
