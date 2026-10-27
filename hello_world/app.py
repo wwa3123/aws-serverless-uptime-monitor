@@ -1,5 +1,8 @@
 import json
+import os
 from urllib.parse import urlsplit
+import uuid
+import boto3
 
 def lambda_handler(event, context):
     """Sample pure Lambda function
@@ -101,11 +104,24 @@ def lambda_handler(event, context):
             }),
         }
 
+    monitor_id = str(uuid.uuid4())
+
+    record = {
+        "monitor_id": monitor_id,
+        "url": url,
+        "interval_seconds": interval_seconds,
+        "is_active": True
+    }
+
+    table = boto3.resource("dynamodb").Table(os.environ["MONITORS_TABLE"])
+    table.put_item(Item=record)
+
     return {
-        "statusCode": 200,
+        "statusCode": 201,
         "body": json.dumps({
             "message": "URL and interval seconds received",
             "url": url,
-            "interval_seconds": interval_seconds
+            "interval_seconds": interval_seconds,
+            "monitor_id": monitor_id
         }),
     }

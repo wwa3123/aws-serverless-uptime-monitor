@@ -24,16 +24,25 @@ Resources:
           Properties:
             Path: /monitors
             Method: post    
+      Environment:
+        Variables:
+          MONITORS_TABLE: !Ref MonitorsTable 
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem 
+              Resource: !GetAtt MonitorsTable.Arn
   MonitorsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      BillingMode: PAY_PER_REQUEST # TODO: choose on-demand billing
+      BillingMode: PAY_PER_REQUEST 
       AttributeDefinitions:
         - AttributeName: monitor_id
-          AttributeType: S # TODO: string type
+          AttributeType: S 
       KeySchema:
         - AttributeName: monitor_id
-          KeyType: HASH # TODO: partition key
+          KeyType: HASH 
 
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
