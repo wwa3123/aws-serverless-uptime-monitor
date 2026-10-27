@@ -1,4 +1,5 @@
 import json
+from urllib.parse import urlsplit
 import requests
 
 
@@ -23,6 +24,93 @@ def lambda_handler(event, context):
 
         Return doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html
     """
+    body = event.get("body")
+
+    if not body:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({
+                "message": "Request body is empty",
+            }),
+        }
+            
+    try:
+        parsed_body = json.loads(body)
+    except json.JSONDecodeError:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({
+                "message": "Invalid JSON format",
+            }),
+        }
+    
+    if not isinstance(parsed_body, dict):
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'error': 'JSON payload must be an object'})
+            }
+
+    url = parsed_body.get("url")
+    if not url or not isinstance(url, str):
+        return {
+            "statusCode": 400,
+            "body": json.dumps({
+                "message": "URL is missing or invalid",
+            }),
+        }
+
+    try:
+        parsed_url = urlsplit(url)
+    except ValueError:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"message": "URL is malformed"}),
+        }  
+
+    if parsed_url.scheme not in ("http", "https"):
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"message": "URL must use http or https"}),
+        }
+
+    if not parsed_url.hostname:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"message": "URL must include a hostname"}),
+        }
+    
+    if parsed_url.username or parsed_url.password:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"message": "URL must not contain credentials"}),
+        }
+    
+    interval_seconds = parsed_body.get("interval_seconds")
+    if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int):
+        return {
+            "statusCode": 400,
+            "body": json.dumps({
+                "message": "Interval seconds must be an integer",
+            }),
+        }
+    
+    if interval_seconds < 900:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({
+                "message": "Interval seconds must be at least 900",
+            }),
+        }
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "message": "URL and interval seconds received",
+            "url": url,
+            "interval_seconds": interval_seconds
+        }),
+    }
 
     try:
         ip = requests.get("http://checkip.amazonaws.com/")
