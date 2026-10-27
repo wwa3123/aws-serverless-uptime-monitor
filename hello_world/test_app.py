@@ -67,6 +67,8 @@ class TestLambdaValidation(unittest.TestCase):
             self.assertEqual(inserted_item["interval_seconds"], 900)
             self.assertTrue(inserted_item["is_active"])
             self.assertIn("monitor_id", inserted_item)
+            self.assertIn('next_check_at', inserted_item)
+            self.assertIsInstance(inserted_item['next_check_at'], int)
 
 if __name__ == '__main__':
     unittest.main()

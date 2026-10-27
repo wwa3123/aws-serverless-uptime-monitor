@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from urllib.parse import urlsplit
 import uuid
 import boto3
@@ -105,16 +106,20 @@ def lambda_handler(event, context):
         }
 
     monitor_id = str(uuid.uuid4())
+    current_time = int(time.time())
+    next_check_at = current_time + interval_seconds
 
     record = {
         "monitor_id": monitor_id,
         "url": url,
         "interval_seconds": interval_seconds,
-        "is_active": True
+        "is_active": True,
+        "next_check_at": next_check_at
     }
 
     table = boto3.resource("dynamodb").Table(os.environ["MONITORS_TABLE"])
     table.put_item(Item=record)
+    
 
     return {
         "statusCode": 201,
