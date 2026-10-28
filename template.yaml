@@ -50,6 +50,7 @@ Resources:
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt CheckDLQ.Arn
         maxReceiveCount: 3
+      VisibilityTimeout: 90
   CheckDLQ:
     Type: AWS::SQS::Queue
     Properties:
@@ -82,6 +83,47 @@ Resources:
           Properties:
             Schedule: rate(5 minutes)
             Enabled: false
+  CheckResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: monitor_id
+          AttributeType: S
+        - AttributeName: checked_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: monitor_id
+          KeyType: HASH
+        - AttributeName: checked_at
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: hello_world/
+      Handler: worker.lambda_handler
+      Runtime: python3.14
+      Timeout: 15
+      Environment:
+        Variables:
+          CHECK_RESULTS_TABLE: !Ref CheckResultsTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt CheckResultsTable.Arn
+      Events:
+        CheckQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CheckQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import os
 import app
 
-class TestLambda(unittest.TestCase):
+class TestApp(unittest.TestCase):
     
     def assert_status_code(self, event, expected_code):
         response = app.lambda_handler(event, None)

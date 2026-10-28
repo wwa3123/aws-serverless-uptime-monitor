@@ -54,7 +54,7 @@ def lambda_handler(event, context):
             }
 
     url = parsed_body.get("url")
-    if not url or not isinstance(url, str):
+    if not url or not isinstance(url, str) or not url.strip() or any(character.isspace() for character in url):
         return {
             "statusCode": 400,
             "body": json.dumps({
