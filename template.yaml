@@ -1,48 +1,218 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: |
-  Hello World AWS Lambda and Amazon API Gateway REST API
-  Sample AWS SAM template to create a simple Lambda function connected to a REST API.
+  AWS Serverless Uptime and Webhook Monitor
+  SAM template for API Gateway, Lambda, SQS, DynamoDB, EventBridge, and SNS.
 
 # More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
 Globals:
   Function:
     Timeout: 3
 
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email address to receive monitor alert notifications
+  EnableDispatchSchedule:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable recurring monitor checks when deploying the stack
+
+Conditions:
+  EnableDispatchScheduleCondition: !Equals
+    - !Ref EnableDispatchSchedule
+    - 'true'
+
 Resources:
-  HelloWorldFunction:
+  CreateMonitorFunction:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
-      CodeUri: hello_world/
+      CodeUri: uptime_monitor/
       Handler: app.lambda_handler
       Runtime: python3.14
+      Timeout: 10
       Architectures:
         - x86_64
       Events:
-        HelloWorld:
+        CreateMonitor:
           Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
           Properties:
             Path: /monitors
-            Method: post    
+            Method: post
+            RestApiId: !Ref MonitorRestApi
       Environment:
         Variables:
-          MONITORS_TABLE: !Ref MonitorsTable 
+          MONITORS_TABLE: !Ref MonitorsTable
+          MONITOR_QUOTA_TABLE: !Ref MonitorQuotaTable
       Policies:
         - Statement:
             - Effect: Allow
               Action:
-                - dynamodb:PutItem 
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt MonitorsTable.Arn
+                - !GetAtt MonitorQuotaTable.Arn
+  DashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: uptime_monitor/
+      Handler: dashboard.lambda_handler
+      Runtime: python3.14
+      Timeout: 10
+      Environment:
+        Variables:
+          MONITORS_TABLE: !Ref MonitorsTable
+          CHECK_RESULTS_TABLE: !Ref CheckResultsTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
               Resource: !GetAtt MonitorsTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource: !GetAtt CheckResultsTable.Arn
+      Events:
+        PublicDashboard:
+          Type: Api
+          Properties:
+            Path: /status
+            Method: get
+            RestApiId: !Ref MonitorRestApi
+            Auth:
+              Authorizer: NONE
   MonitorsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      BillingMode: PAY_PER_REQUEST 
+      BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: monitor_id
-          AttributeType: S 
+          AttributeType: S
       KeySchema:
         - AttributeName: monitor_id
-          KeyType: HASH 
+          KeyType: HASH
+  MonitorQuotaTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: quota_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: quota_id
+          KeyType: HASH
+  MonitorRestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+        InvokeRole: CALLER_CREDENTIALS
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          ThrottlingRateLimit: 1
+          ThrottlingBurstLimit: 2
+  DashboardSiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  DashboardOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-dashboard-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  DashboardDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: DashboardSiteOrigin
+            DomainName: !GetAtt DashboardSiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt DashboardOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: MonitorApiOrigin
+            DomainName: !Sub ${MonitorRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+            OriginPath: /Prod
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: DashboardSiteOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          MinTTL: 0
+          DefaultTTL: 60
+          MaxTTL: 300
+        CacheBehaviors:
+          - PathPattern: /status
+            TargetOriginId: MonitorApiOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            ForwardedValues:
+              QueryString: false
+              Cookies:
+                Forward: none
+            MinTTL: 0
+            DefaultTTL: 0
+            MaxTTL: 0
+        PriceClass: PriceClass_100
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+  DashboardSiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardSiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${DashboardSiteBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}
   CheckQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -58,14 +228,14 @@ Resources:
   DispatcherFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: hello_world/
+      CodeUri: uptime_monitor/
       Handler: dispatcher.lambda_handler
       Runtime: python3.14
       Timeout: 30
       Environment:
         Variables:
           MONITORS_TABLE: !Ref MonitorsTable
-          CHECK_QUEUE_URL: !Ref CheckQueue 
+          CHECK_QUEUE_URL: !Ref CheckQueue
       Policies:
         - Statement:
             - Effect: Allow
@@ -77,12 +247,23 @@ Resources:
               Action:
                 - sqs:SendMessage
               Resource: !GetAtt CheckQueue.Arn
-      Events:
-        DispatchSchedule:
-          Type: Schedule
-          Properties:
-            Schedule: rate(5 minutes)
-            Enabled: false
+  DispatchSchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableDispatchScheduleCondition
+    Properties:
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DispatcherFunction.Arn
+          Id: DispatcherFunctionTarget
+  DispatchSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: EnableDispatchScheduleCondition
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DispatcherFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DispatchSchedule.Arn
   CheckResultsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -103,19 +284,25 @@ Resources:
   WorkerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: hello_world/
+      CodeUri: uptime_monitor/
       Handler: worker.lambda_handler
       Runtime: python3.14
       Timeout: 15
       Environment:
         Variables:
           CHECK_RESULTS_TABLE: !Ref CheckResultsTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
       Policies:
         - Statement:
             - Effect: Allow
               Action:
                 - dynamodb:PutItem
+                - dynamodb:Query
               Resource: !GetAtt CheckResultsTable.Arn
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref AlertTopic
       Events:
         CheckQueueEvent:
           Type: SQS
@@ -124,16 +311,35 @@ Resources:
             BatchSize: 5
             FunctionResponseTypes:
               - ReportBatchItemFailures
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: alert-topic
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
   # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-  HelloWorldApi:
-    Description: API Gateway endpoint URL for Prod stage for Hello World function
-    Value: !Sub https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/monitors
-  HelloWorldFunction:
-    Description: Hello World Lambda Function ARN
-    Value: !GetAtt HelloWorldFunction.Arn
-  HelloWorldFunctionIamRole:
-    Description: Implicit IAM Role created for Hello World function
-    Value: !GetAtt HelloWorldFunctionRole.Arn
+  MonitorApiEndpoint:
+    Description: API Gateway endpoint URL for the monitor API
+    Value: !Sub https://${MonitorRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/monitors
+  DashboardUrl:
+    Description: Public CloudFront URL for the read-only dashboard
+    Value: !Sub https://${DashboardDistribution.DomainName}
+  DashboardBucketName:
+    Description: Private S3 bucket that stores the dashboard page
+    Value: !Ref DashboardSiteBucket
+  CreateMonitorFunction:
+    Description: Create monitor Lambda function ARN
+    Value: !GetAtt CreateMonitorFunction.Arn
+  CreateMonitorFunctionIamRole:
+    Description: IAM role for the create monitor Lambda function
+    Value: !GetAtt CreateMonitorFunctionRole.Arn
+  AlertTopic:
+    Description: SNS topic for alerts
+    Value: !Ref AlertTopic

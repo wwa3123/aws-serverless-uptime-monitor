@@ -1,8 +1,8 @@
 {
-    "body": "{\"message\": \"hello world\"}",
-    "resource": "/hello",
-    "path": "/hello",
-    "httpMethod": "GET",
+    "body": "{\"url\": \"https://example.com\", \"interval_seconds\": 300}",
+    "resource": "/monitors",
+    "path": "/monitors",
+    "httpMethod": "POST",
     "isBase64Encoded": false,
     "queryStringParameters": {
       "foo": "bar"
@@ -53,8 +53,8 @@
         "userAgent": "Custom User Agent String",
         "user": null
       },
-      "path": "/prod/hello",
-      "resourcePath": "/hello",
+      "path": "/prod/monitors",
+      "resourcePath": "/monitors",
       "httpMethod": "POST",
       "apiId": "1234567890",
       "protocol": "HTTP/1.1"

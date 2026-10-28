@@ -1,14 +1,14 @@
 {
-  "title": "Hello World AWS Lambda and Amazon API Gateway REST API",
-  "description": "Create a simple Lambda function connected to a REST API.",
+  "title": "AWS Serverless Uptime and Webhook Monitor",
+  "description": "Monitor HTTP endpoints with serverless AWS services and send transition alerts.",
   "language": "Python",
   "level": "200",
   "framework": "AWS SAM",
   "introBox": {
     "headline": "How it works",
     "text": [
-      "This sample project shows how to trigger a simple Lambda function using a REST API.",
-      "This pattern deploys one Lambda function and one API Gateway REST API."
+      "Create monitors through API Gateway and process scheduled checks with Lambda, SQS, and DynamoDB.",
+      "The monitor worker records results and publishes health-transition alerts through SNS."
     ]
   },
   "gitHub": {

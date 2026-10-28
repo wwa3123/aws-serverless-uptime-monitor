@@ -1,15 +1,17 @@
 import json
 import unittest
 from boto3.dynamodb.conditions import Key
-from hello_world.worker import (
+from uptime_monitor.worker import (
     build_check_result_item,
     check_monitor,
     get_http_status,
+    get_health_status,
     get_latest_check_result,
     is_public_ip_address,
     lambda_handler,
     open_pinned_connection,
     parse_monitor_message,
+    publish_alert,
     resolve_public_addresses,
     save_check_result,
 )
@@ -77,6 +79,14 @@ class TestWorker(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_monitor_message(self.make_record(interval_seconds=True))
 
+    def test_interval_below_300_seconds_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            parse_monitor_message(self.make_record(interval_seconds=299))
+
+    def test_interval_of_300_seconds_is_valid(self):
+        result = parse_monitor_message(self.make_record(interval_seconds=300))
+        self.assertEqual(result["interval_seconds"], 300)
+
     def test_boolean_next_check_at_raises_value_error(self):
         with self.assertRaises(ValueError):
             parse_monitor_message(self.make_record(next_check_at=True))
@@ -134,7 +144,7 @@ class TestWorker(unittest.TestCase):
             with self.subTest(ip=ip):
                 self.assertEqual(is_public_ip_address(ip), expected)
 
-    @patch("hello_world.worker.socket.getaddrinfo")
+    @patch("uptime_monitor.worker.socket.getaddrinfo")
     def test_resolve_public_addresses_rejects_mixed_public_and_private(self, mock_getaddrinfo):
         mock_getaddrinfo.return_value = [
             (2, 1, 6, "", ("8.8.8.8", 443)),
@@ -146,7 +156,7 @@ class TestWorker(unittest.TestCase):
 
         mock_getaddrinfo.assert_called_once()
 
-    @patch('hello_world.worker.socket.getaddrinfo')
+    @patch('uptime_monitor.worker.socket.getaddrinfo')
     def test_resolve_public_addresses_returns_distinct_public_ips(self, mock_getaddrinfo):
 
         mock_getaddrinfo.return_value = [
@@ -163,7 +173,7 @@ class TestWorker(unittest.TestCase):
         
         self.assertCountEqual(result, ['93.184.216.34', '8.8.8.8'])
 
-    @patch('hello_world.worker.socket.getaddrinfo')
+    @patch('uptime_monitor.worker.socket.getaddrinfo')
     def test_resolve_public_addresses_empty_result_raises_error(self, mock_getaddrinfo):
         mock_getaddrinfo.return_value = []
         
@@ -176,7 +186,7 @@ class TestWorker(unittest.TestCase):
         with self.assertRaises(ValueError):
             open_pinned_connection("example.com", 443, "10.0.0.1", use_tls=True)
 
-    @patch("hello_world.worker.socket.create_connection")
+    @patch("uptime_monitor.worker.socket.create_connection")
     def test_open_pinned_connection_uses_validated_ip(self, mock_create_connection):
         mock_connection = mock_create_connection.return_value
 
@@ -193,8 +203,8 @@ class TestWorker(unittest.TestCase):
             timeout=5,
         )
 
-    @patch("hello_world.worker.ssl.create_default_context")
-    @patch("hello_world.worker.socket.create_connection")
+    @patch("uptime_monitor.worker.ssl.create_default_context")
+    @patch("uptime_monitor.worker.socket.create_connection")
     def test_open_pinned_connection_uses_tls_hostname(
         self,
         mock_create_connection,
@@ -223,8 +233,8 @@ class TestWorker(unittest.TestCase):
             server_hostname="example.com",
         )
 
-    @patch("hello_world.worker.http.client.HTTPResponse")
-    @patch("hello_world.worker.open_pinned_connection")
+    @patch("uptime_monitor.worker.http.client.HTTPResponse")
+    @patch("uptime_monitor.worker.open_pinned_connection")
     def test_get_http_status_returns_status_and_closes_socket(
         self,
         mock_open_connection,
@@ -257,9 +267,9 @@ class TestWorker(unittest.TestCase):
         mock_response.begin.assert_called_once_with()
         mock_socket.close.assert_called_once_with()
 
-    @patch("hello_world.worker.get_http_status", return_value=204)
+    @patch("uptime_monitor.worker.get_http_status", return_value=204)
     @patch(
-        "hello_world.worker.resolve_public_addresses",
+        "uptime_monitor.worker.resolve_public_addresses",
         return_value=["8.8.8.8", "1.1.1.1"],
     )
     def test_check_monitor_returns_healthy_result_for_2xx(
@@ -288,9 +298,9 @@ class TestWorker(unittest.TestCase):
             "8.8.8.8",
         )
 
-    @patch("hello_world.worker.get_http_status", return_value=302)
+    @patch("uptime_monitor.worker.get_http_status", return_value=302)
     @patch(
-        "hello_world.worker.resolve_public_addresses",
+        "uptime_monitor.worker.resolve_public_addresses",
         return_value=["8.8.8.8"],
     )
     def test_check_monitor_treats_redirect_as_unhealthy(
@@ -320,11 +330,11 @@ class TestWorker(unittest.TestCase):
         )
 
     @patch(
-        "hello_world.worker.get_http_status",
+        "uptime_monitor.worker.get_http_status",
         side_effect=OSError("connection failed"),
     )
     @patch(
-        "hello_world.worker.resolve_public_addresses",
+        "uptime_monitor.worker.resolve_public_addresses",
         return_value=["8.8.8.8"],
     )
     def test_check_monitor_records_network_error(
@@ -456,20 +466,106 @@ class TestWorker(unittest.TestCase):
         self.assertFalse(query_args["ScanIndexForward"])
         self.assertEqual(query_args["Limit"], 1)
 
-    @patch.dict("os.environ", {"CHECK_RESULTS_TABLE": "TestCheckResults"})
-    @patch("hello_world.worker.save_check_result")
+    def test_get_health_status_reports_outage_transition(self):
+        previous_result = {"is_healthy": True}
+        current_result = {"is_healthy": False}
+
+        self.assertEqual(
+            get_health_status(previous_result, current_result),
+            "outage",
+        )
+
+    def test_get_health_status_reports_recovery_transition(self):
+        previous_result = {"is_healthy": False}
+        current_result = {"is_healthy": True}
+
+        self.assertEqual(
+            get_health_status(previous_result, current_result),
+            "recovery",
+        )
+
+    def test_get_health_status_reports_first_observed_outage(self):
+        current_result = {"is_healthy": False}
+
+        self.assertEqual(get_health_status(None, current_result), "outage")
+
+    def test_get_health_status_does_not_report_first_healthy_result(self):
+        current_result = {"is_healthy": True}
+
+        self.assertIsNone(get_health_status(None, current_result))
+
+    def test_get_health_status_ignores_repeated_health_status(self):
+        self.assertIsNone(
+            get_health_status(
+                {"is_healthy": True},
+                {"is_healthy": True},
+            )
+        )
+        self.assertIsNone(
+            get_health_status(
+                {"is_healthy": False},
+                {"is_healthy": False},
+            )
+        )
+
+    def test_publish_alert_sends_json_message_and_transition_subject(self):
+        sns_client = MagicMock()
+        result = {
+            "status_code": None,
+            "is_healthy": False,
+        }
+
+        publish_alert(
+            sns_client,
+            "arn:aws:sns:us-east-1:123456789012:alerts",
+            "mon-1",
+            "outage",
+            result,
+            1_700_000_900,
+        )
+
+        sns_client.publish.assert_called_once()
+        publish_args = sns_client.publish.call_args.kwargs
+        self.assertEqual(
+            publish_args["TopicArn"],
+            "arn:aws:sns:us-east-1:123456789012:alerts",
+        )
+        self.assertEqual(publish_args["Subject"], "Monitor Outage")
+        self.assertEqual(
+            json.loads(publish_args["Message"]),
+            {
+                "monitor_id": "mon-1",
+                "transition": "outage",
+                "status_code": None,
+                "is_healthy": False,
+                "checked_at": 1_700_000_900,
+            },
+        )
+
+    @patch.dict(
+        "os.environ",
+        {
+            "CHECK_RESULTS_TABLE": "TestCheckResults",
+            "ALERT_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:alerts",
+        },
+    )
+    @patch("uptime_monitor.worker.save_check_result")
     @patch(
-        "hello_world.worker.check_monitor",
+        "uptime_monitor.worker.check_monitor",
         return_value={
             "monitor_id": "mon-active",
             "status_code": 204,
             "is_healthy": True,
         },
     )
-    @patch("hello_world.worker.parse_monitor_message")
-    @patch("hello_world.worker.boto3.resource")
+    @patch("uptime_monitor.worker.parse_monitor_message")
+    @patch("uptime_monitor.worker.boto3.resource")
+    @patch("uptime_monitor.worker.boto3.client")
+    @patch("uptime_monitor.worker.get_latest_check_result", return_value=None)
     def test_lambda_handler_processes_active_skips_inactive_and_reports_failures(
         self,
+        mock_get_latest,
+        mock_client,
         mock_resource,
         mock_parse,
         mock_check_monitor,
@@ -514,13 +610,19 @@ class TestWorker(unittest.TestCase):
         self.assertIsInstance(mock_save_result.call_args.args[2], int)
         self.assertEqual(mock_parse.call_count, 3)
 
-    @patch.dict("os.environ", {"CHECK_RESULTS_TABLE": "TestCheckResults"})
+    @patch.dict(
+        "os.environ",
+        {
+            "CHECK_RESULTS_TABLE": "TestCheckResults",
+            "ALERT_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:alerts",
+        },
+    )
     @patch(
-        "hello_world.worker.save_check_result",
+        "uptime_monitor.worker.save_check_result",
         side_effect=RuntimeError("DynamoDB write failed"),
     )
     @patch(
-        "hello_world.worker.check_monitor",
+        "uptime_monitor.worker.check_monitor",
         return_value={
             "monitor_id": "mon-write-failed",
             "status_code": 204,
@@ -528,7 +630,7 @@ class TestWorker(unittest.TestCase):
         },
     )
     @patch(
-        "hello_world.worker.parse_monitor_message",
+        "uptime_monitor.worker.parse_monitor_message",
         return_value={
             "monitor_id": "mon-write-failed",
             "url": "https://example.com",
@@ -537,9 +639,13 @@ class TestWorker(unittest.TestCase):
             "next_check_at": 1234567890,
         },
     )
-    @patch("hello_world.worker.boto3.resource")
+    @patch("uptime_monitor.worker.boto3.resource")
+    @patch("uptime_monitor.worker.boto3.client")
+    @patch("uptime_monitor.worker.get_latest_check_result", return_value=None)
     def test_lambda_handler_reports_result_write_failure(
         self,
+        mock_get_latest,
+        mock_client,
         mock_resource,
         mock_parse,
         mock_check_monitor,
@@ -558,10 +664,16 @@ class TestWorker(unittest.TestCase):
         mock_check_monitor.assert_called_once()
         mock_save_result.assert_called_once()
 
-    @patch.dict("os.environ", {"CHECK_RESULTS_TABLE": "TestCheckResults"})
-    @patch("hello_world.worker.save_check_result")
+    @patch.dict(
+        "os.environ",
+        {
+            "CHECK_RESULTS_TABLE": "TestCheckResults",
+            "ALERT_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:alerts",
+        },
+    )
+    @patch("uptime_monitor.worker.save_check_result")
     @patch(
-        "hello_world.worker.check_monitor",
+        "uptime_monitor.worker.check_monitor",
         return_value={
             "monitor_id": "mon-network-failure",
             "status_code": None,
@@ -570,7 +682,7 @@ class TestWorker(unittest.TestCase):
         },
     )
     @patch(
-        "hello_world.worker.parse_monitor_message",
+        "uptime_monitor.worker.parse_monitor_message",
         return_value={
             "monitor_id": "mon-network-failure",
             "url": "https://example.com",
@@ -579,9 +691,13 @@ class TestWorker(unittest.TestCase):
             "next_check_at": 1234567890,
         },
     )
-    @patch("hello_world.worker.boto3.resource")
+    @patch("uptime_monitor.worker.boto3.resource")
+    @patch("uptime_monitor.worker.boto3.client")
+    @patch("uptime_monitor.worker.get_latest_check_result", return_value=None)
     def test_lambda_handler_saves_and_acknowledges_network_failure_result(
         self,
+        mock_get_latest,
+        mock_client,
         mock_resource,
         mock_parse,
         mock_check_monitor,
@@ -604,6 +720,117 @@ class TestWorker(unittest.TestCase):
             mock_resource.return_value.Table.return_value,
         )
         self.assertIsInstance(mock_save_result.call_args.args[2], int)
+
+    def test_lambda_handler_publishes_alert_on_health_transition(self):
+        monitor = {
+            "monitor_id": "mon-transition",
+            "url": "https://example.com",
+            "interval_seconds": 900,
+            "is_active": True,
+            "next_check_at": 1234567890,
+        }
+        previous_result = {"is_healthy": True}
+        current_result = {
+            "monitor_id": "mon-transition",
+            "status_code": None,
+            "is_healthy": False,
+        }
+        record = {"messageId": "msg-transition", "body": "valid"}
+        topic_arn = "arn:aws:sns:us-east-1:123456789012:alerts"
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CHECK_RESULTS_TABLE": "TestCheckResults",
+                    "ALERT_TOPIC_ARN": topic_arn,
+                },
+            ),
+            patch("uptime_monitor.worker.boto3.resource") as mock_resource,
+            patch("uptime_monitor.worker.boto3.client") as mock_client,
+            patch(
+                "uptime_monitor.worker.parse_monitor_message",
+                return_value=monitor,
+            ),
+            patch(
+                "uptime_monitor.worker.get_latest_check_result",
+                return_value=previous_result,
+            ),
+            patch(
+                "uptime_monitor.worker.check_monitor",
+                return_value=current_result,
+            ),
+            patch("uptime_monitor.worker.save_check_result") as mock_save,
+        ):
+            response = lambda_handler({"Records": [record]}, None)
+
+        self.assertEqual(response, {"batchItemFailures": []})
+        mock_client.assert_called_once_with("sns")
+        sns_client = mock_client.return_value
+        sns_client.publish.assert_called_once()
+        published = sns_client.publish.call_args.kwargs
+        self.assertEqual(published["TopicArn"], topic_arn)
+        self.assertEqual(published["Subject"], "Monitor Outage")
+        self.assertEqual(
+            json.loads(published["Message"]),
+            {
+                "monitor_id": "mon-transition",
+                "transition": "outage",
+                "status_code": None,
+                "is_healthy": False,
+                "checked_at": mock_save.call_args.args[2],
+            },
+        )
+        self.assertEqual(
+            mock_save.call_args.args[0],
+            mock_resource.return_value.Table.return_value,
+        )
+
+    def test_lambda_handler_does_not_publish_when_health_is_unchanged(self):
+        monitor = {
+            "monitor_id": "mon-unchanged",
+            "url": "https://example.com",
+            "interval_seconds": 900,
+            "is_active": True,
+            "next_check_at": 1234567890,
+        }
+        healthy_result = {
+            "monitor_id": "mon-unchanged",
+            "status_code": 204,
+            "is_healthy": True,
+        }
+        record = {"messageId": "msg-unchanged", "body": "valid"}
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CHECK_RESULTS_TABLE": "TestCheckResults",
+                    "ALERT_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:alerts",
+                },
+            ),
+            patch("uptime_monitor.worker.boto3.resource"),
+            patch("uptime_monitor.worker.boto3.client") as mock_client,
+            patch(
+                "uptime_monitor.worker.parse_monitor_message",
+                return_value=monitor,
+            ),
+            patch(
+                "uptime_monitor.worker.get_latest_check_result",
+                return_value={"is_healthy": True},
+            ),
+            patch(
+                "uptime_monitor.worker.check_monitor",
+                return_value=healthy_result,
+            ),
+            patch("uptime_monitor.worker.save_check_result") as mock_save,
+        ):
+            response = lambda_handler({"Records": [record]}, None)
+
+        self.assertEqual(response, {"batchItemFailures": []})
+        mock_client.assert_called_once_with("sns")
+        mock_client.return_value.publish.assert_not_called()
+        mock_save.assert_called_once()
 
             
 if __name__ == '__main__':

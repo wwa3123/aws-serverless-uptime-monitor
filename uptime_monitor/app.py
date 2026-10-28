@@ -4,6 +4,62 @@ import time
 from urllib.parse import urlsplit
 import uuid
 import boto3
+from boto3.dynamodb.types import TypeSerializer
+from botocore.exceptions import ClientError
+
+MAX_MONITORS = 10
+MIN_INTERVAL_SECONDS = 300
+
+class MonitorLimitReached(Exception):
+    pass
+
+
+def create_monitor_with_quota(client, quota_table_name, monitors_table_name, record):
+    serializer = TypeSerializer()
+    serialized_record = {
+        key: serializer.serialize(value)
+        for key, value in record.items()
+    }
+
+    try:
+        client.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": quota_table_name,
+                        "Key": {"quota_id": {"S": "monitor_count"}},
+                        "UpdateExpression": (
+                            "SET #count = if_not_exists(#count, :zero) + :one"
+                        ),
+                        "ConditionExpression": (
+                            "attribute_not_exists(#count) OR #count < :limit"
+                        ),
+                        "ExpressionAttributeNames": {"#count": "monitor_count"},
+                        "ExpressionAttributeValues": {
+                            ":zero": {"N": "0"},
+                            ":one": {"N": "1"},
+                            ":limit": {"N": str(MAX_MONITORS)},
+                        },
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": monitors_table_name,
+                        "Item": serialized_record,
+                    }
+                },
+            ]
+        )
+    except ClientError as error:
+        error_response = error.response
+        if error_response.get("Error", {}).get("Code") == "TransactionCanceledException":
+            cancellation_reasons = error_response.get("CancellationReasons", [])
+            if (
+                cancellation_reasons
+                and cancellation_reasons[0].get("Code") == "ConditionalCheckFailed"
+            ):
+                raise MonitorLimitReached from error
+        raise
 
 def lambda_handler(event, context):
     """Sample pure Lambda function
@@ -97,11 +153,11 @@ def lambda_handler(event, context):
             }),
         }
     
-    if interval_seconds < 900:
+    if interval_seconds < MIN_INTERVAL_SECONDS:
         return {
             "statusCode": 400,
             "body": json.dumps({
-                "message": "Interval seconds must be at least 900",
+                "message": f"Interval seconds must be at least {MIN_INTERVAL_SECONDS}",
             }),
         }
 
@@ -117,9 +173,21 @@ def lambda_handler(event, context):
         "next_check_at": next_check_at
     }
 
-    table = boto3.resource("dynamodb").Table(os.environ["MONITORS_TABLE"])
-    table.put_item(Item=record)
-    
+    try:
+        dynamodb_client = boto3.client("dynamodb")
+        create_monitor_with_quota(
+            dynamodb_client,
+            os.environ["MONITOR_QUOTA_TABLE"],
+            os.environ["MONITORS_TABLE"],
+            record,
+        )
+    except MonitorLimitReached:
+        return {
+            "statusCode": 409,
+            "body": json.dumps({
+                "message": f"Monitor limit of {MAX_MONITORS} reached",
+            }),
+        }
 
     return {
         "statusCode": 201,

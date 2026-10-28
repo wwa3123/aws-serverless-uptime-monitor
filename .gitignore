@@ -5,3 +5,5 @@ __pycache__/
 *.pyd
 *.dll
 *.lib
+.aws-sam/
+dispatcher-response.json

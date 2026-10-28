@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Uptime Monitor</title>
+  <style>
+    :root {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #172033;
+      background: #f3f6fb;
+      font-synthesis: none;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+    }
+
+    main {
+      width: min(100% - 2rem, 960px);
+      margin: 4rem auto;
+    }
+
+    .header, .panel, .monitor-row {
+      background: #fff;
+      border: 1px solid #dfe5ef;
+      border-radius: 12px;
+    }
+
+    .header, .panel {
+      padding: 1.5rem;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.5rem, 4vw, 2rem);
+    }
+
+    .subtitle, .muted {
+      color: #5b667a;
+    }
+
+    .preview-note {
+      margin: .75rem 0 0;
+      color: #704b00;
+      font-size: .9rem;
+    }
+
+    .subtitle {
+      margin: .4rem 0 0;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: .7rem 1rem;
+      color: #fff;
+      background: #2457c5;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: .65;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th, td {
+      padding: .9rem .75rem;
+      border-bottom: 1px solid #e8edf4;
+    }
+
+    th {
+      color: #5b667a;
+      font-size: .8rem;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    td:first-child {
+      font-weight: 600;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: .25rem .55rem;
+      border-radius: 999px;
+      font-size: .85rem;
+      font-weight: 650;
+      text-transform: capitalize;
+    }
+
+    .healthy {
+      color: #17613a;
+      background: #e3f6eb;
+    }
+
+    .unhealthy {
+      color: #9c2c2c;
+      background: #fde9e7;
+    }
+
+    .unknown {
+      color: #5b667a;
+      background: #edf0f5;
+    }
+
+    .message {
+      margin: 1rem 0 0;
+      min-height: 1.5em;
+      color: #5b667a;
+    }
+
+    .message.error {
+      color: #9c2c2c;
+    }
+
+    @media (max-width: 560px) {
+      main {
+        margin: 1rem auto;
+      }
+
+      .header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="header">
+      <div>
+        <h1>Uptime Monitor</h1>
+        <p class="subtitle">Public, read-only status for monitored hosts.</p>
+        <p id="preview-note" class="preview-note" hidden>Local preview uses synthetic status data; these results are not live checks.</p>
+      </div>
+      <button id="refresh" type="button">Refresh status</button>
+    </header>
+
+    <section class="panel" aria-label="Monitor status">
+      <p id="summary" class="muted" aria-live="polite">Loading monitor status…</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Host</th>
+              <th scope="col">Health</th>
+              <th scope="col">Last checked</th>
+            </tr>
+          </thead>
+          <tbody id="monitors"></tbody>
+        </table>
+      </div>
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script>
+    const refreshButton = document.querySelector("#refresh");
+    const summary = document.querySelector("#summary");
+    const monitorList = document.querySelector("#monitors");
+    const message = document.querySelector("#message");
+    const previewNote = document.querySelector("#preview-note");
+
+    function formatTimestamp(seconds) {
+      if (seconds === null) {
+        return "Not checked yet";
+      }
+      return new Date(seconds * 1000).toLocaleString();
+    }
+
+    function makeCell(text) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      return cell;
+    }
+
+    function renderMonitors(monitors) {
+      monitorList.replaceChildren();
+
+      for (const monitor of monitors) {
+        const row = document.createElement("tr");
+        row.append(makeCell(monitor.hostname));
+
+        const healthCell = document.createElement("td");
+        const badge = document.createElement("span");
+        badge.className = `badge ${monitor.health_state}`;
+        badge.textContent = monitor.health_state;
+        healthCell.append(badge);
+        row.append(healthCell);
+
+        row.append(makeCell(formatTimestamp(monitor.last_checked)));
+        monitorList.append(row);
+      }
+
+      summary.textContent = `${monitors.length} monitor${monitors.length === 1 ? "" : "s"}`;
+    }
+
+    async function loadStatus() {
+      refreshButton.disabled = true;
+      message.textContent = "";
+      message.classList.remove("error");
+
+      try {
+        const response = await fetch("/status", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Status request failed with HTTP ${response.status}`);
+        }
+        previewNote.hidden = response.headers.get("X-Uptime-Preview") !== "mock";
+
+        const data = await response.json();
+        if (!data || !Array.isArray(data.monitors)) {
+          throw new Error("Status response has an unexpected format");
+        }
+
+        renderMonitors(data.monitors);
+      } catch (error) {
+        message.textContent = "Could not load monitor status. Try refreshing.";
+        message.classList.add("error");
+        summary.textContent = "Status unavailable";
+        console.error(error);
+      } finally {
+        refreshButton.disabled = false;
+      }
+    }
+
+    refreshButton.addEventListener("click", loadStatus);
+    loadStatus();
+  </script>
+</body>
+</html>

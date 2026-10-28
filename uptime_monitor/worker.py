@@ -12,6 +12,8 @@ import traceback
 import boto3
 from boto3.dynamodb.conditions import Key
 
+MIN_INTERVAL_SECONDS = 300
+
 
 def parse_monitor_message(record):
     if not isinstance(record, dict):
@@ -41,7 +43,7 @@ def parse_monitor_message(record):
     if (
         isinstance(interval_seconds, bool)
         or not isinstance(interval_seconds, int)
-        or interval_seconds < 900
+        or interval_seconds < MIN_INTERVAL_SECONDS
     ):
         raise ValueError("Invalid interval_seconds")
 
@@ -193,9 +195,58 @@ def get_latest_check_result(table, monitor_id):
     items = response.get("Items", [])
     return items[0] if items else None  
 
+def get_health_status(previous_result, current_result):
+    current_is_healthy = current_result["is_healthy"]
+
+    if previous_result is None:
+        return None if current_is_healthy else "outage"
+
+    previous_is_healthy = previous_result["is_healthy"]
+    if previous_is_healthy and not current_is_healthy:
+        return "outage"
+    if not previous_is_healthy and current_is_healthy:
+        return "recovery"
+
+    return None
+
+def publish_alert(sns_client, topic_arn, monitor_id, transition, result, checked_at):
+    message = {
+        "monitor_id": monitor_id,
+        "transition": transition,
+        "status_code": result["status_code"],
+        "is_healthy": result["is_healthy"],
+        "checked_at": checked_at,
+    }
+    subject = f"Monitor {transition.title()}"
+    sns_client.publish(
+        TopicArn=topic_arn,
+        Subject=subject,
+        Message=json.dumps(message),
+    )
+
+def process_monitor(monitor, table, sns_client, topic_arn):
+    previous_result = get_latest_check_result(table, monitor["monitor_id"])
+    result = check_monitor(monitor)
+    checked_at = int(time.time())
+
+    transition = get_health_status(previous_result, result)
+    if transition:
+        publish_alert(
+            sns_client,
+            topic_arn,
+            monitor["monitor_id"],
+            transition,
+            result,
+            checked_at,
+        )
+
+    save_check_result(table, result, checked_at)
+
 def lambda_handler(event, context):
     table = boto3.resource("dynamodb").Table(os.environ["CHECK_RESULTS_TABLE"])
     batch_item_failures = []
+    sns_client = boto3.client("sns")
+    topic_arn = os.environ["ALERT_TOPIC_ARN"]
 
     for record in event["Records"]:
         message_id = record["messageId"]
@@ -206,12 +257,9 @@ def lambda_handler(event, context):
             if not monitor["is_active"]:
                 continue
 
-            result = check_monitor(monitor)
-            checked_at = int(time.time())
-            save_check_result(table, result, checked_at)
+            process_monitor(monitor, table, sns_client, topic_arn)
 
         except Exception:
-
             traceback.print_exc(file=sys.stderr)    
             print(f"Error processing message {message_id}", file=sys.stderr)
             batch_item_failures.append({"itemIdentifier": message_id})
