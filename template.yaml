@@ -55,6 +55,14 @@ Resources:
               Resource:
                 - !GetAtt MonitorsTable.Arn
                 - !GetAtt MonitorQuotaTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt MonitorQuotaTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt MonitorsTable.Arn
   DashboardFunction:
     Type: AWS::Serverless::Function
     Properties:
