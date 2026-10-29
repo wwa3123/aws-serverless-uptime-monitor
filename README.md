@@ -7,7 +7,7 @@ A Python/Boto3 project for creating endpoint monitors, scheduling checks, proces
 - API Gateway `POST /monitors` uses AWS_IAM authorization. A DynamoDB transaction enforces the hard limit of 10 total monitor records.
 - API Gateway `GET /status` is public and read-only. It returns only hostnames, health states, and last-check timestamps.
 - A five-minute EventBridge schedule can dispatch due monitors to SQS. It is disabled by default.
-- The SQS worker checks URLs, records results in DynamoDB with a 30-day TTL, and sends SNS alerts on health-state transitions. Failed SQS records retry and can reach the dead-letter queue.
+- The SQS worker checks URLs, records results in DynamoDB with a 30-day TTL, and publishes SNS alerts on health-state transitions. Email subscription is optional and disabled by default. Failed SQS records retry and can reach the dead-letter queue.
 - A private S3 bucket stores the dashboard page. CloudFront serves the page and proxies `/status` to API Gateway on the same origin.
 
 The worker validates resolved IP addresses before connecting and does not follow redirects. This helps protect the checker from requests to private or otherwise unsafe network addresses.
@@ -53,7 +53,7 @@ lstk --endpoint-url http://localhost:4566 sam deploy `
   --stack-name urlhealthcheck `
   --capabilities CAPABILITY_IAM `
   --resolve-s3 `
-  --parameter-overrides AlertEmail=test@example.com EnableDispatchSchedule=false
+  --parameter-overrides AlertEmail='' EnableEmailAlerts=false EnableDispatchSchedule=false
 ```
 
 Upload the static page to the private bucket created by the stack:
@@ -79,7 +79,8 @@ To confirm the API response independently, invoke the local API Gateway stage at
 - Maximum total monitor records: 10.
 - Check history TTL: 30 days.
 - Public dashboard fields: hostname, health state, and last checked time; full URL paths and query strings are not returned.
-- Alert emails require a real SNS subscription confirmation on AWS. `test@example.com` is only a LocalStack placeholder.
+- To receive alert emails, deploy with `EnableEmailAlerts=true` and a real `AlertEmail`; confirm the subscription from that mailbox. Email alerts are disabled by default.
+- For CloudFront distribution plans that attach a web ACL, pass that distribution's web ACL ARN as `CloudFrontWebACLArn` when deploying. The ARN is account-specific; leave it unset for distributions without an attached web ACL.
 
 ## Cleanup
 

@@ -12,7 +12,19 @@ Globals:
 Parameters:
   AlertEmail:
     Type: String
-    Description: Email address to receive monitor alert notifications
+    Default: ''
+    Description: Optional email address for SNS transition alerts
+  EnableEmailAlerts:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Create an email subscription for SNS transition alerts
+  CloudFrontWebACLArn:
+    Type: String
+    Default: ''
+    Description: Optional CloudFront-scope WAF web ACL ARN required by some distribution plans
   EnableDispatchSchedule:
     Type: String
     Default: 'false'
@@ -22,6 +34,13 @@ Parameters:
     Description: Enable recurring monitor checks when deploying the stack
 
 Conditions:
+  EnableEmailAlertsCondition: !Equals
+    - !Ref EnableEmailAlerts
+    - 'true'
+  HasCloudFrontWebACL: !Not
+    - !Equals
+      - !Ref CloudFrontWebACLArn
+      - ''
   EnableDispatchScheduleCondition: !Equals
     - !Ref EnableDispatchSchedule
     - 'true'
@@ -151,6 +170,10 @@ Resources:
       DistributionConfig:
         Enabled: true
         DefaultRootObject: index.html
+        WebACLId: !If
+          - HasCloudFrontWebACL
+          - !Ref CloudFrontWebACLArn
+          - !Ref AWS::NoValue
         Origins:
           - Id: DashboardSiteOrigin
             DomainName: !GetAtt DashboardSiteBucket.RegionalDomainName
@@ -188,7 +211,6 @@ Resources:
               - HEAD
             Compress: true
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-        PriceClass: PriceClass_100
         Restrictions:
           GeoRestriction:
             RestrictionType: none
@@ -313,6 +335,7 @@ Resources:
       TopicName: alert-topic
   AlertEmailSubscription:
     Type: AWS::SNS::Subscription
+    Condition: EnableEmailAlertsCondition
     Properties:
       TopicArn: !Ref AlertTopic
       Protocol: email
