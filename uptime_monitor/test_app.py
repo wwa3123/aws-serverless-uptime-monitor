@@ -122,6 +122,48 @@ class TestApp(unittest.TestCase):
         body = json.dumps({"url": "https:///path/only", "interval_seconds": 900})
         self.assert_status_code({"body": body}, 400)
 
+    def test_invalid_url_ports_return_400_without_writing(self):
+        invalid_urls = [
+            "https://example.com:not-a-port/path",
+            "https://example.com:0/path",
+            "https://example.com:65536/path",
+        ]
+
+        with patch("app.boto3.client") as mock_boto3_client:
+            for url in invalid_urls:
+                with self.subTest(url=url):
+                    body = json.dumps({
+                        "url": url,
+                        "interval_seconds": 300,
+                    })
+                    response = app.lambda_handler({"body": body}, None)
+
+                    self.assertEqual(response["statusCode"], 400)
+
+        mock_boto3_client.assert_not_called()
+
+    def test_valid_url_port_boundaries_are_accepted(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MONITORS_TABLE": "TestMonitorsTable",
+                "MONITOR_QUOTA_TABLE": "TestMonitorQuotaTable",
+            },
+        ), patch("app.boto3.client") as mock_boto3_client:
+            for port in (1, 65535):
+                with self.subTest(port=port):
+                    body = json.dumps({
+                        "url": f"https://example.com:{port}/health",
+                        "interval_seconds": 300,
+                    })
+                    response = app.lambda_handler({"body": body}, None)
+                    self.assertEqual(response["statusCode"], 201)
+
+        self.assertEqual(
+            mock_boto3_client.return_value.transact_write_items.call_count,
+            2,
+        )
+
     def test_interval_boolean_returns_400(self):
         body = json.dumps({"url": "https://example.com", "interval_seconds": True})
         self.assert_status_code({"body": body}, 400)

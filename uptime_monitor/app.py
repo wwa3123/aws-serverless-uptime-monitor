@@ -137,6 +137,20 @@ def lambda_handler(event, context):
             "statusCode": 400,
             "body": json.dumps({"message": "URL must include a hostname"}),
         }
+
+    try:
+        port = parsed_url.port
+    except ValueError:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"message": "URL port is invalid"}),
+        }
+
+    if port is not None and not 1 <= port <= 65535:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"message": "URL port is invalid"}),
+        }
     
     if parsed_url.username or parsed_url.password:
         return {
